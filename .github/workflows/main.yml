@@ -1,0 +1,91 @@
+name: CI/CD for Laravel + Vue
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: testdb
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: pass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # ---- Laravel Backend ----
+    - name: Set up PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: 8.4
+        extensions: pgsql, mbstring, bcmath, curl, xml, zip
+
+    - name: Install Composer deps
+      working-directory: backend
+      run: composer install --no-dev --optimize-autoloader
+
+    - name: Laravel config & migrate
+      working-directory: backend
+      env:
+        DB_CONNECTION: pgsql
+        DB_HOST: 127.0.0.1
+        DB_PORT: 5432
+        DB_DATABASE: testdb
+        DB_USERNAME: user
+        DB_PASSWORD: pass
+      run: |
+        cp .env.example .env
+        php artisan key:generate
+        php artisan migrate --force
+
+    - name: Laravel tests
+      working-directory: backend
+      run: php artisan test
+
+    # ---- Vue Frontend ----
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install and Build Frontend
+      working-directory: frontend
+      run: |
+        npm ci
+        npm run build
+
+    # ---- Deploy via SSH ----
+    - name: Deploy to VPS
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.SERVER_IP }}
+        username: ${{ secrets.SSH_USER }}
+        key: ${{ secrets.SSH_KEY }}
+        script: |
+          cd ${{ secrets.DEPLOY_PATH }}
+          git pull origin main
+
+          cd backend
+          composer install --no-dev
+          php artisan migrate --force
+          php artisan config:cache
+
+          cd ../frontend
+          npm ci
+          npm run build
+
+          sudo supervisorctl restart all
